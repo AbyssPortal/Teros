@@ -1,7 +1,11 @@
 extern crate rust_chess;
 
+#[allow(dead_code)]
 pub mod teros_engine {
-    use std::{collections::BinaryHeap, f32::INFINITY};
+    use std::{
+        collections::{BinaryHeap, VecDeque},
+        f32::INFINITY
+    };
 
     use ordered_float::NotNan;
     use std::collections::BTreeMap;
@@ -23,7 +27,7 @@ pub mod teros_engine {
 
     struct ValuedMoveLocation {
         valued_move: ValuedChessMove,
-        location: Vec<ChessMove>,
+        location: VecDeque<ChessMove>,
     }
 
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash)]
@@ -35,7 +39,7 @@ pub mod teros_engine {
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
     struct MoveTree {
         board_state: Board,
-        moves: BTreeMap<ChessMove, Option<MoveTree>>,
+        moves: BTreeMap<ChessMove, MoveTree>,
     }
 
     impl MoveTree {
@@ -43,15 +47,13 @@ pub mod teros_engine {
             if depth > max_depth {
                 return;
             }
-            for (chess_move, tree_option) in self.moves.iter() {
+            for (chess_move, tree) in self.moves.iter() {
                 for _ in 0..depth {
                     print!("  |");
                 }
                 print!("-");
                 println!("{}", chess_move.name());
-                if let Some(tree) = tree_option {
-                    tree.print_tree(depth + 1, max_depth);
-                }
+                tree.print_tree(depth + 1, max_depth);
             }
         }
     }
@@ -62,10 +64,11 @@ pub mod teros_engine {
         move_tree: MoveTree,
     }
 
-    #[derive(Clone, Copy, Debug)]
+    #[derive(Clone, Debug)]
     pub enum EngineError {
         InvalidLocationError,
         NoValidMovesErrror,
+        IllegalMoveError,
     }
 
     impl<'a> Engine {
@@ -77,25 +80,20 @@ pub mod teros_engine {
                     board_state: Board::new(),
                 },
             };
-            res.generate_all_moves(vec![]).unwrap();
+            res.generate_all_moves(VecDeque::new()).unwrap();
             res
         }
-
-        
 
         //go to a branch specified by the list of moves in location.
         fn go_to_location(
             &'a mut self,
-            location: &Vec<ChessMove>,
+            location: &VecDeque<ChessMove>,
         ) -> Result<&'a mut MoveTree, EngineError> {
             let mut current_tree = &mut self.move_tree;
             for chess_move in location {
                 match current_tree.moves.get_mut(chess_move) {
-                    Some(Some(child_tree)) => {
+                    Some(child_tree) => {
                         current_tree = child_tree;
-                    }
-                    Some(None) => {
-                        return Err(EngineError::InvalidLocationError);
                     }
                     None => {
                         return Err(EngineError::InvalidLocationError);
@@ -105,7 +103,35 @@ pub mod teros_engine {
             Ok(current_tree)
         }
 
-        fn generate_all_moves(&mut self, location: Vec<ChessMove>) -> Result<(), EngineError> {
+        pub fn interpret_and_make_move(&mut self, move_string: &str) -> Result<(), EngineError> {
+            let chess_move = self.move_tree.board_state.interpret_move(move_string)
+            .ok().ok_or(EngineError::IllegalMoveError)?;
+            self.make_move(&chess_move)?;
+            Ok(())
+        }
+
+        pub fn make_move(&mut self, chess_move: &ChessMove) -> Result<(), EngineError> {
+            self.move_tree = self
+                .move_tree
+                .moves
+                .get_mut(chess_move)
+                .ok_or(EngineError::IllegalMoveError)?
+                .clone();
+            self.moves
+                .retain(|x| x.location.len() > 0 && x.location[0] == *chess_move);
+
+            let mut new_moves = self.moves.clone().into_vec();
+
+            new_moves.iter_mut().for_each(|x| {
+                x.location.pop_front();
+            });
+
+            self.moves = BinaryHeap::from(new_moves);
+
+            Ok(())
+        }
+
+        fn generate_all_moves(&mut self, location: VecDeque<ChessMove>) -> Result<(), EngineError> {
             let tree = self.go_to_location(&location)?;
             for i in 0..BOARD_SIZE {
                 for j in 0..BOARD_SIZE {
@@ -117,10 +143,10 @@ pub mod teros_engine {
                                     Ok(()) => {
                                         tree.moves.insert(
                                             chess_move,
-                                            Some(MoveTree {
+                                            MoveTree {
                                                 board_state: new_board,
                                                 moves: BTreeMap::new(),
-                                            }),
+                                            },
                                         );
                                     }
                                     Err(_) => {}
@@ -140,8 +166,8 @@ pub mod teros_engine {
                 new_moves.push(ValuedMoveLocation {
                     valued_move: ValuedChessMove {
                         chess_move: chess_move.clone(),
-                        value: Engine::evaluate_interest(chess_move, &tree.board_state).unwrap() 
-                        - location.len() as f32,
+                        value: Engine::evaluate_interest(chess_move, &tree.board_state).unwrap()
+                            - location.len() as f32,
                     },
                     location: location.clone(),
                 });
@@ -167,8 +193,11 @@ pub mod teros_engine {
         pub fn think_next_move(&mut self) -> Result<(), EngineError> {
             let next_move = self.moves.pop().ok_or(EngineError::NoValidMovesErrror)?;
             let mut location = next_move.location;
-            println!("Pondering about {}", next_move.valued_move.chess_move.name());
-            location.push(next_move.valued_move.chess_move);
+            println!(
+                "Pondering about {}",
+                next_move.valued_move.chess_move.name()
+            );
+            location.push_back(next_move.valued_move.chess_move);
             self.generate_all_moves(location)?;
             Ok(())
         }
