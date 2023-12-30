@@ -40,12 +40,12 @@ pub mod teros_engine {
 
     impl MoveTree {
         pub fn print_tree(&self, depth: i32, max_depth: i32) {
-            if (depth > max_depth) {
+            if depth > max_depth {
                 return;
             }
             for (chess_move, tree_option) in self.moves.iter() {
-                for i in 0..depth {
-                    print!("|");
+                for _ in 0..depth {
+                    print!("  |");
                 }
                 print!("-");
                 println!("{}", chess_move.name());
@@ -140,7 +140,8 @@ pub mod teros_engine {
                 new_moves.push(ValuedMoveLocation {
                     valued_move: ValuedChessMove {
                         chess_move: chess_move.clone(),
-                        value: Engine::evaluate_interest(chess_move, &tree.board_state).unwrap(),
+                        value: Engine::evaluate_interest(chess_move, &tree.board_state).unwrap() 
+                        - location.len() as f32,
                     },
                     location: location.clone(),
                 });
@@ -166,6 +167,7 @@ pub mod teros_engine {
         pub fn think_next_move(&mut self) -> Result<(), EngineError> {
             let next_move = self.moves.pop().ok_or(EngineError::NoValidMovesErrror)?;
             let mut location = next_move.location;
+            println!("Pondering about {}", next_move.valued_move.chess_move.name());
             location.push(next_move.valued_move.chess_move);
             self.generate_all_moves(location)?;
             Ok(())
