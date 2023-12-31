@@ -113,12 +113,12 @@ pub mod teros_engine {
     }
 
     impl<'a> Engine {
-        pub fn new() -> Engine {
+        pub fn new(board: Board) -> Engine {
             let mut res = Engine {
                 moves: BinaryHeap::new(),
                 move_tree: MoveTree {
                     moves: BTreeMap::new(),
-                    board_state: Board::new(),
+                    board_state: board,
                 },
             };
             res.generate_all_moves(VecDeque::new()).unwrap();
@@ -287,12 +287,19 @@ pub mod teros_engine {
             ending_board: &Board,
         ) -> Result<NotNan<f32>, BoardError> {
             Ok(
-                //piece_worth(
-                //     starting_board
-                //         .get_piece(normal_move.initial_row, normal_move.initial_col)?
-                //         .ok_or(BoardError::NoPieceError)?
-                //         .kind,
-                // )*0.1 //pulled out of nowehre
+                // match starting_board.get_piece(normal_move.initial_row, normal_move.initial_col)? {
+                //     None => NotNan::new(0.0).unwrap(),
+                //     Some(Piece {kind: PieceKind::Pawn, color }) => {
+                //         let past = is_past_pawn(normal_move.destination_row, normal_move.destination_col, ending_board, color);
+                //         match past {
+                //             true => NotNan::new(normal_move.destination_row as f32).unwrap(),
+                //             false => NotNan::new(0.0).unwrap()
+                //         }
+                //     }
+                //     Some(_) => {
+                //         NotNan::new(0.0).unwrap()
+                //     }
+                // } +
                 match starting_board.get_piece(normal_move.destination_row, normal_move.destination_col)? {
                 Some(piece) => {
                     piece_worth(piece.kind)
@@ -428,5 +435,33 @@ pub mod teros_engine {
             }
             res
         }
+    }
+
+    fn is_past_pawn(row: usize, col: usize, ending_board: &Board, color: Color) -> bool {
+        let to_left_option = col.checked_sub(1);
+        let to_center = col;
+        let to_right = col + 1;
+                        
+        let cols = match to_left_option {
+            Some(to_left) => vec![to_left, to_center, to_right],
+            None => vec![to_center, to_right]
+        };
+                        
+        let mut past = true;
+        for i in row..BOARD_SIZE {
+            for j in cols.clone() {
+                let piece_result = ending_board.get_piece(i, j);
+                match piece_result {
+                Ok(Some(piece)) => {
+                    if piece == (Piece{kind: PieceKind::Pawn, color: color.opposite()}) {
+                    past = false;
+                    }
+                },
+                _ => {}
+                }
+            }
+    
+        }
+        past
     }
 }
