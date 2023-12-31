@@ -2,18 +2,19 @@ mod engine;
 
 use std::io::stdout;
 
+use rust_chess::chess::chess::Board;
 use text_io::read;
 fn main() {
-    let mut engine = engine::teros_engine::Engine::new();
+    let mut engine = engine::teros_engine::Engine::new(Board::new());
 
     engine.print_tree(10);
     let mut stdout = stdout();
-    const START_EVAL_TURN: i32= 74;
+    const START_EVAL_TURN: i32 = 0;
     let mut i = 1;
     loop {
         if engine.get_board().get_turn() == rust_chess::chess::chess::Color::White && i >= START_EVAL_TURN {
             println!("PONDERING!!!!");
-            for _ in 0..10000 {
+            for _ in 0..0 {
                 engine.think_next_move().unwrap();
             }
             println!("EVALUATING!!!!");
@@ -28,11 +29,22 @@ fn main() {
                 }
             );
         }
-        // engine.print_tree(10);
+        engine.print_tree(10);
         engine.get_board().print_board(&mut stdout).unwrap();
         println!("U THINK NOW!!!!");
-        let chess_move_string: String = read!();
-        engine.interpret_and_make_move(&chess_move_string).unwrap();
+        loop {
+            let chess_move_string: String = read!();
+            let chess_move = engine.get_board().interpret_move(&chess_move_string);
+            match chess_move {
+                Ok(chess_move) => {
+                    match engine.make_move(&chess_move) {
+                        Ok(_) => {break;},
+                        Err(err) => {println!("{:?}", err)}
+                    }
+                }
+                Err(_) => {},
+            }
+        }
         i += 1;
     }
 
