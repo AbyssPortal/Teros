@@ -2,7 +2,7 @@ mod engine;
 
 use std::{
     io::stdin,
-    io::{stdout, Read},
+    io::stdout,
 };
 
 use rust_chess::chess::{

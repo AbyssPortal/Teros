@@ -463,30 +463,27 @@ pub mod teros_engine {
                             true => NotNan::new(normal_move.destination_row as f32).unwrap(),
                             false => NotNan::new(0.0).unwrap(),
                         }
-                         + match (normal_move.initial_row == match color {
+                         + match normal_move.initial_row == match color {
                             Color::Black => 6,
                             Color::White => 1,
-                        }) {
+                        } {
                             true => interest_eval_weights.home_row_pawn_weight,
                             false => 0.0,
                         };
                         value
                     }
-                    Some(Piece {kind: PieceKind::Bishop | PieceKind::Knight, color }) => {
+                    Some(Piece {kind: PieceKind::Bishop | PieceKind::Knight, color: _ }) => {
                         NotNan::new(interest_eval_weights.minor_piece_moving_bouns).unwrap()
                     },
-                    Some(Piece {kind: PieceKind::Rook, color }) => {
+                    Some(Piece {kind: PieceKind::Rook, color: _ }) => {
                         NotNan::new(interest_eval_weights.rook_moving_bonus).unwrap()
                     },
-                    Some(Piece {kind: PieceKind::Queen, color }) => {
+                    Some(Piece {kind: PieceKind::Queen, color: _ }) => {
                         NotNan::new(interest_eval_weights.queen_moving_bonus).unwrap()
                     },
-                    Some(Piece {kind: PieceKind::King, color }) => {
+                    Some(Piece {kind: PieceKind::King, color: _ }) => {
                         NotNan::new(interest_eval_weights.king_moving_bonus).unwrap()
                     },
-                    Some(_) => {
-                        NotNan::new(0.0).unwrap()
-                    }
                 } +
                 match starting_board.get_piece(normal_move.destination_row, normal_move.destination_col)? {
                 Some(piece) => {
