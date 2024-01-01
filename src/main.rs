@@ -5,7 +5,10 @@ use std::{
     io::{stdout, Read},
 };
 
-use rust_chess::chess::chess::{make_board_from_fen, Board, Color};
+use rust_chess::chess::{
+    self,
+    chess::{make_board_from_fen, Board, Color},
+};
 use std::thread;
 use text_io::read;
 
@@ -69,13 +72,18 @@ fn main() {
         }
     };
 
+    let pgn_mode = yes_or_no("pgn only mode?");
+
     // engine.print_tree(10);
     let mut stdout = stdout();
     const START_EVAL_TURN: i32 = 0;
     let mut i = 1;
+    let mut move_number = 1;
     loop {
         if turns_to_eval.contains(&Some(engine.get_board().get_turn())) && i >= START_EVAL_TURN {
-            println!("PONDERING!!!! (enter any value to stop)");
+            if !pgn_mode {
+                println!("PONDERING!!!! (enter any value to stop)");
+            }
             // ...
 
             let (stop_sender, stop_reciever) = std::sync::mpsc::channel();
@@ -119,24 +127,33 @@ fn main() {
             engine = res.0;
             let i = res.1;
 
-            println!("PONDERED {} TIMES!!!!", i);
-
-            println!("EVALUATING!!!!");
+            if !pgn_mode {
+                println!("PONDERED {} TIMES!!!!", i);
+                println!("EVALUATING!!!!");
+            }
             let eval = engine.eval_and_best_move();
             // engine.print_tree(10);
-            println!(
-                "BALANCE IS {}. I LIKE THE MOVE {}",
-                eval.0,
-                match eval.1 {
-                    Some(chess_move) => chess_move.name(engine.get_board()).unwrap(),
-                    None => String::from("THERE ARE NO MOVES"),
-                }
-            );
+            if !pgn_mode {
+                println!(
+                    "BALANCE IS {}. I LIKE THE MOVE {}",
+                    eval.0,
+                    match eval.1 {
+                        Some(chess_move) => chess_move.name(engine.get_board()).unwrap(),
+                        None => String::from("THERE ARE NO MOVES"),
+                    }
+                );
+            }
             if turns_to_play.contains(&Some(engine.get_board().get_turn())) {
                 match eval.1 {
                     Some(chess_move) => {
-                        engine.get_board().print_board(&mut stdout).unwrap();
-                        engine.make_move(&chess_move).unwrap();
+                        make_engine_move_and_print(
+                            pgn_mode,
+                            &mut engine,
+                            &mut move_number,
+                            chess_move,
+                            &mut stdout,
+                        )
+                        .unwrap();
                         continue;
                     }
                     None => {
@@ -145,13 +162,20 @@ fn main() {
                 }
             }
         }
-        engine.get_board().print_board(&mut stdout).unwrap();
-        println!("U THINK NOW!!!!");
+        if !pgn_mode {
+            println!("U THINK NOW!!!!");
+        }
         loop {
             let chess_move_string: String = read!();
             let chess_move = engine.get_board().interpret_move(&chess_move_string);
             match chess_move {
-                Ok(chess_move) => match engine.make_move(&chess_move) {
+                Ok(chess_move) => match make_engine_move_and_print(
+                    pgn_mode,
+                    &mut engine,
+                    &mut move_number,
+                    chess_move,
+                    &mut stdout,
+                ) {
                     Ok(_) => {
                         break;
                     }
@@ -168,6 +192,31 @@ fn main() {
     }
 
     // println!("{:#?}", engine); // Debug print the engine variable
+}
+
+fn make_engine_move_and_print(
+    pgn_mode: bool,
+    engine: &mut engine::teros_engine::Engine,
+    move_number: &mut i32,
+    chess_move: chess::chess::ChessMove,
+    stdout: &mut std::io::Stdout,
+) -> Result<(), engine::teros_engine::EngineError> {
+    if pgn_mode {
+        match engine.get_board().get_turn() {
+            Color::White => print!(
+                "{}. {}",
+                move_number,
+                chess_move.name(engine.get_board()).unwrap()
+            ),
+            Color::Black => {
+                print!(" {}\n", chess_move.name(engine.get_board()).unwrap());
+                *move_number += 1;
+            }
+        }
+    } else {
+        engine.get_board().print_board(stdout).unwrap();
+    }
+    engine.make_move(&chess_move)
 }
 
 fn yes_or_no(question: &str) -> bool {
