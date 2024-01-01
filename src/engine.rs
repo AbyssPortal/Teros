@@ -14,7 +14,7 @@ pub mod teros_engine {
 
     use rust_chess::chess::chess::*;
 
-    fn piece_worth(piece: PieceKind) -> NotNan<f32> {
+    fn piece_worth_king_inf(piece: PieceKind) -> NotNan<f32> {
         match piece {
             PieceKind::Pawn => NotNan::new(1.0).unwrap(),
             PieceKind::Knight => NotNan::new(3.0).unwrap(),
@@ -22,6 +22,17 @@ pub mod teros_engine {
             PieceKind::Rook => NotNan::new(5.0).unwrap(),
             PieceKind::Queen => NotNan::new(9.0).unwrap(),
             PieceKind::King => NotNan::new(INFINITY).unwrap(),
+        }
+    }
+
+    fn piece_worth_king_zero(piece: PieceKind) -> NotNan<f32> {
+        match piece {
+            PieceKind::Pawn => NotNan::new(1.0).unwrap(),
+            PieceKind::Knight => NotNan::new(3.0).unwrap(),
+            PieceKind::Bishop => NotNan::new(3.0).unwrap(),
+            PieceKind::Rook => NotNan::new(5.0).unwrap(),
+            PieceKind::Queen => NotNan::new(9.0).unwrap(),
+            PieceKind::King => NotNan::new(0.0).unwrap(),
         }
     }
 
@@ -118,7 +129,7 @@ pub mod teros_engine {
 
     impl ValuedMoveLocation {
         fn value_accounted_for_distance(&self) -> NotNan<f32> {
-            const DEPTH_COST: f32 = 15.0;
+            const DEPTH_COST: f32 = 25.0;
             self.valued_move.value - self.depth_cost * self.location.len() as f32
         }
     }
@@ -205,13 +216,18 @@ pub mod teros_engine {
         pub fn new() -> MinimaxSettings {
             MinimaxSettings { min_depth: 2 }
         }
-    } 
+    }
 
     #[derive(Debug, Clone)]
     pub struct InterestEvaluationWeights {
         pub square_control_weight: f32,
         pub capture_weight: f32,
         pub home_row_pawn_weight: f32,
+        pub check_weight: f32,
+        pub king_moving_bonus: f32,
+        pub queen_moving_bonus: f32,
+        pub rook_moving_bonus: f32,
+        pub minor_piece_moving_bouns: f32,
     }
 
     impl InterestEvaluationWeights {
@@ -219,7 +235,12 @@ pub mod teros_engine {
             InterestEvaluationWeights {
                 square_control_weight: 0.2,
                 capture_weight: 2.5,
-                home_row_pawn_weight: 3.5
+                home_row_pawn_weight: 3.5,
+                check_weight: 10.0,
+                king_moving_bonus: -2.0,
+                queen_moving_bonus: 1.0,
+                rook_moving_bonus: 2.0,
+                minor_piece_moving_bouns: 4.0,
             }
         }
     }
@@ -419,7 +440,7 @@ pub mod teros_engine {
                         normal_move,
                         starting_board,
                         ending_board,
-                    )? + piece_worth(*piece_kind)
+                    )? + piece_worth_king_inf(*piece_kind)
                 }
                 Castling(_) => NotNan::new(20.0).unwrap(),
             };
@@ -451,13 +472,25 @@ pub mod teros_engine {
                         };
                         value
                     }
+                    Some(Piece {kind: PieceKind::Bishop | PieceKind::Knight, color }) => {
+                        NotNan::new(interest_eval_weights.minor_piece_moving_bouns).unwrap()
+                    },
+                    Some(Piece {kind: PieceKind::Rook, color }) => {
+                        NotNan::new(interest_eval_weights.rook_moving_bonus).unwrap()
+                    },
+                    Some(Piece {kind: PieceKind::Queen, color }) => {
+                        NotNan::new(interest_eval_weights.queen_moving_bonus).unwrap()
+                    },
+                    Some(Piece {kind: PieceKind::King, color }) => {
+                        NotNan::new(interest_eval_weights.king_moving_bonus).unwrap()
+                    },
                     Some(_) => {
                         NotNan::new(0.0).unwrap()
                     }
                 } +
                 match starting_board.get_piece(normal_move.destination_row, normal_move.destination_col)? {
                 Some(piece) => {
-                    piece_worth(piece.kind)
+                    piece_worth_king_inf(piece.kind)
                 }
                 None => {
                     NotNan::new(0.0).unwrap()
@@ -466,12 +499,12 @@ pub mod teros_engine {
              + match ending_board.is_check.is_some() {
                 true => match ending_board.is_checkmate.is_some() {
                     true => INFINITY,
-                    false => 5.0 //no reason no method
+                    false => interest_eval_weights.check_weight
                 }
                 false => 0.0
             }
              + match starting_board.get_piece(normal_move.destination_row, normal_move.destination_col)  {
-                Ok(Some(piece)) => piece_worth(piece.kind),
+                Ok(Some(piece)) => piece_worth_king_inf(piece.kind),
                 Ok(None) => NotNan::new(0.0).unwrap(),
                 Err(_) => panic!()
              } * interest_eval_weights.capture_weight
@@ -608,7 +641,7 @@ pub mod teros_engine {
                             (if piece.kind == PieceKind::King {
                                 NotNan::new(0.0).unwrap()
                             } else {
-                                piece_worth(piece.kind)
+                                piece_worth_king_inf(piece.kind)
                             }) * match piece.color {
                                 Color::White => 1.0,
                                 Color::Black => -1.0,
