@@ -4,12 +4,13 @@ extern crate rust_chess;
 pub mod teros_engine {
     use std::{
         collections::{BinaryHeap, VecDeque},
-        f32::{INFINITY, NEG_INFINITY},
+        f32::INFINITY,
     };
 
     use ordered_float::NotNan;
     use std::cmp::Ordering;
     use std::collections::BTreeMap;
+    use std::fmt;
 
     use rust_chess::chess::chess::*;
 
@@ -25,10 +26,88 @@ pub mod teros_engine {
     }
 
     #[derive(Debug, PartialEq, Eq, Clone)]
+    pub enum Eval {
+        Numeric(NotNan<f32>),
+        MateIn(Color, i32),
+    }
+
+    impl Eval {
+        fn increase_mate_counter(self) -> Eval {
+            match self {
+                Eval::Numeric(_) => self,
+                Eval::MateIn(color, counter) => Eval::MateIn(color, counter + 1),
+            }
+        }
+    }
+
+    impl fmt::Display for Eval {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Eval::Numeric(value) => write!(f, "{}", value),
+                Eval::MateIn(color, value) => {
+                    write!(
+                        f,
+                        "{}M{}",
+                        match color {
+                            Color::Black => '-',
+                            Color::White => '+',
+                        },
+                        value
+                    )
+                }
+            }
+        }
+    }
+    #[test]
+    fn test_eval() {
+        let _m5 = Eval::MateIn(Color::Black, 5);
+        let _m1 = Eval::MateIn(Color::Black, 1);
+        let m5 = Eval::MateIn(Color::White, 5);
+        let m1 = Eval::MateIn(Color::White, 1);
+        let one = Eval::Numeric(NotNan::new(1.0).unwrap());
+        let _one = Eval::Numeric(NotNan::new(-1.0).unwrap());
+        assert!(_m5 > _m1);
+        assert!(m5 < m1);
+        assert!(_m5 < m1);
+        assert!(m5 > _m1);
+        assert!(m1 > one);
+        assert!(one > _one);
+        assert!(_one > _m1);
+    }
+
+    impl Ord for Eval {
+        fn cmp(&self, other: &Self) -> Ordering {
+            match (self, other) {
+                (Eval::Numeric(value1), Eval::Numeric(value2)) => value1.cmp(value2),
+                (Eval::MateIn(color1, value1), Eval::MateIn(color2, value2)) => {
+                    match (color1, color2) {
+                        (Color::Black, Color::White) => Ordering::Less,
+                        (Color::White, Color::Black) => Ordering::Greater,
+                        (Color::White, Color::White) => value1.cmp(value2).reverse(),
+                        (Color::Black, Color::Black) => value1.cmp(value2),
+                    }
+                }
+                (Eval::Numeric(_), Eval::MateIn(color, _)) => match color {
+                    Color::Black => Ordering::Greater,
+                    Color::White => Ordering::Less,
+                },
+                (Eval::MateIn(_, _), Eval::Numeric(_)) => other.cmp(self).reverse(),
+            }
+        }
+    }
+
+    impl PartialOrd for Eval {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq, Clone)]
 
     struct ValuedMoveLocation {
         valued_move: ValuedChessMove,
         location: VecDeque<ChessMove>,
+        depth_cost: NotNan<f32>,
     }
 
     #[derive(Debug, PartialEq, Eq, Clone, Hash, PartialOrd, Ord)]
@@ -39,7 +118,8 @@ pub mod teros_engine {
 
     impl ValuedMoveLocation {
         fn value_accounted_for_distance(&self) -> NotNan<f32> {
-            self.valued_move.value - self.location.len() as f32
+            const DEPTH_COST: f32 = 15.0;
+            self.valued_move.value - self.depth_cost * self.location.len() as f32
         }
     }
 
@@ -103,6 +183,56 @@ pub mod teros_engine {
     pub struct Engine {
         moves: BinaryHeap<ValuedMoveLocation>,
         move_tree: MoveTree,
+        static_eval_weights: StaticEvaluationWeights,
+        interest_eval_weights: InterestEvaluationWeights,
+        minimax_settings: MinimaxSettings,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct StaticEvaluationWeights {
+        pub square_control_weight: f32,
+        pub check_weight: f32,
+        pub value_weight: f32,
+        pub depth_cost: NotNan<f32>,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct MinimaxSettings {
+        pub min_depth: i32,
+    }
+
+    impl MinimaxSettings {
+        pub fn new() -> MinimaxSettings {
+            MinimaxSettings { min_depth: 2 }
+        }
+    } 
+
+    #[derive(Debug, Clone)]
+    pub struct InterestEvaluationWeights {
+        pub square_control_weight: f32,
+        pub capture_weight: f32,
+        pub home_row_pawn_weight: f32,
+    }
+
+    impl InterestEvaluationWeights {
+        pub fn new() -> Self {
+            InterestEvaluationWeights {
+                square_control_weight: 0.2,
+                capture_weight: 2.5,
+                home_row_pawn_weight: 3.5
+            }
+        }
+    }
+
+    impl StaticEvaluationWeights {
+        pub fn new() -> StaticEvaluationWeights {
+            StaticEvaluationWeights {
+                square_control_weight: 0.05,
+                check_weight: 3.0,
+                value_weight: 1.0,
+                depth_cost: NotNan::new(15.0).unwrap(),
+            }
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -113,13 +243,21 @@ pub mod teros_engine {
     }
 
     impl<'a> Engine {
-        pub fn new(board: Board) -> Engine {
+        pub fn new(
+            board: Board,
+            static_eval_weights: StaticEvaluationWeights,
+            interest_eval_weights: InterestEvaluationWeights,
+            minimax_settings: MinimaxSettings,
+        ) -> Engine {
             let mut res = Engine {
                 moves: BinaryHeap::new(),
                 move_tree: MoveTree {
                     moves: BTreeMap::new(),
                     board_state: board,
                 },
+                interest_eval_weights,
+                static_eval_weights,
+                minimax_settings,
             };
             res.generate_all_moves(VecDeque::new()).unwrap();
             res
@@ -185,16 +323,19 @@ pub mod teros_engine {
         }
 
         fn generate_all_moves(&mut self, location: VecDeque<ChessMove>) -> Result<(), EngineError> {
-            let tree = self.go_to_location(&location)?;
+            let interest_weights = self.interest_eval_weights.clone();
+            let depth_cost = self.static_eval_weights.depth_cost.clone();
+
+            let tree_mut = self.go_to_location(&location)?;
             for i in 0..BOARD_SIZE {
                 for j in 0..BOARD_SIZE {
-                    match tree.board_state.generate_moves(i, j) {
+                    match tree_mut.board_state.generate_moves(i, j) {
                         Ok(moves) => {
                             for chess_move in moves {
-                                let mut new_board = tree.board_state.clone();
+                                let mut new_board = tree_mut.board_state.clone();
                                 match new_board.make_legal_move(chess_move) {
                                     Ok(()) => {
-                                        tree.moves.insert(
+                                        tree_mut.moves.insert(
                                             chess_move,
                                             MoveTree {
                                                 board_state: new_board,
@@ -215,18 +356,20 @@ pub mod teros_engine {
             }
             let mut new_moves = Vec::new();
 
-            for (chess_move, ending_board) in tree.moves.iter() {
+            for (chess_move, ending_board) in tree_mut.moves.iter() {
                 new_moves.push(ValuedMoveLocation {
                     valued_move: ValuedChessMove {
                         chess_move: chess_move.clone(),
                         value: Engine::evaluate_interest(
+                            &interest_weights,
                             chess_move,
-                            &tree.board_state,
+                            &tree_mut.board_state,
                             &ending_board.board_state,
                         )
                         .unwrap(),
                     },
                     location: location.clone(),
+                    depth_cost,
                 });
             }
             for new_move in new_moves {
@@ -256,6 +399,7 @@ pub mod teros_engine {
         }
 
         fn evaluate_interest(
+            interest_eval_weights: &InterestEvaluationWeights,
             chess_move: &ChessMove,
             starting_board: &Board,
             ending_board: &Board,
@@ -264,42 +408,53 @@ pub mod teros_engine {
             //temporary
             let res = match chess_move {
                 Normal(normal_move) => Engine::evaluate_normal_move_interest(
+                    &interest_eval_weights,
                     normal_move,
                     starting_board,
                     ending_board,
                 )?,
                 Promotion(normal_move, piece_kind) => {
                     Engine::evaluate_normal_move_interest(
+                        &interest_eval_weights,
                         normal_move,
                         starting_board,
                         ending_board,
                     )? + piece_worth(*piece_kind)
                 }
-                Castling(_) => NotNan::new(5.0).unwrap(),
+                Castling(_) => NotNan::new(20.0).unwrap(),
             };
 
             Ok(res)
         }
 
         fn evaluate_normal_move_interest(
+            interest_eval_weights: &InterestEvaluationWeights,
             normal_move: &NormalChessMove,
             starting_board: &Board,
             ending_board: &Board,
         ) -> Result<NotNan<f32>, BoardError> {
             Ok(
-                // match starting_board.get_piece(normal_move.initial_row, normal_move.initial_col)? {
-                //     None => NotNan::new(0.0).unwrap(),
-                //     Some(Piece {kind: PieceKind::Pawn, color }) => {
-                //         let past = is_past_pawn(normal_move.destination_row, normal_move.destination_col, ending_board, color);
-                //         match past {
-                //             true => NotNan::new(normal_move.destination_row as f32).unwrap(),
-                //             false => NotNan::new(0.0).unwrap()
-                //         }
-                //     }
-                //     Some(_) => {
-                //         NotNan::new(0.0).unwrap()
-                //     }
-                // } +
+                match starting_board.get_piece(normal_move.initial_row, normal_move.initial_col)? {
+                    None => return Err(BoardError::NoPieceError),
+                    Some(Piece {kind: PieceKind::Pawn, color }) => {
+                        let past = is_past_pawn(normal_move.destination_row, normal_move.destination_col, ending_board, color);
+                        let value = match past {
+                            true => NotNan::new(normal_move.destination_row as f32).unwrap(),
+                            false => NotNan::new(0.0).unwrap(),
+                        }
+                         + match (normal_move.initial_row == match color {
+                            Color::Black => 6,
+                            Color::White => 1,
+                        }) {
+                            true => interest_eval_weights.home_row_pawn_weight,
+                            false => 0.0,
+                        };
+                        value
+                    }
+                    Some(_) => {
+                        NotNan::new(0.0).unwrap()
+                    }
+                } +
                 match starting_board.get_piece(normal_move.destination_row, normal_move.destination_col)? {
                 Some(piece) => {
                     piece_worth(piece.kind)
@@ -307,7 +462,7 @@ pub mod teros_engine {
                 None => {
                     NotNan::new(0.0).unwrap()
                 }
-            } * 1.2//again pulled out of nowhere
+            }//again pulled out of nowhere
              + match ending_board.is_check.is_some() {
                 true => match ending_board.is_checkmate.is_some() {
                     true => INFINITY,
@@ -315,30 +470,63 @@ pub mod teros_engine {
                 }
                 false => 0.0
             }
+             + match starting_board.get_piece(normal_move.destination_row, normal_move.destination_col)  {
+                Ok(Some(piece)) => piece_worth(piece.kind),
+                Ok(None) => NotNan::new(0.0).unwrap(),
+                Err(_) => panic!()
+             } * interest_eval_weights.capture_weight
             + ((Engine::controlling_squares(ending_board, starting_board.get_turn())
              - Engine::controlling_squares(starting_board,starting_board.get_turn())
-            ) as f32)*0.2,
+            ) as f32)*interest_eval_weights.square_control_weight,
             )
         }
 
-        pub fn eval_and_best_move(&self) -> (NotNan<f32>, Option<ChessMove>) {
-            Engine::minimax(&self.move_tree, 1000, self.move_tree.board_state.get_turn() == Color::White)
+        pub fn eval_and_best_move(&self) -> (Eval, Option<ChessMove>) {
+            Engine::minimax(
+                &self,
+                &self.move_tree,
+                0,
+                self.minimax_settings.min_depth,
+                1000,
+                self.move_tree.board_state.get_turn() == Color::White,
+            )
         }
 
         fn minimax(
+            &self,
             tree: &MoveTree,
             depth: i32,
+            min_depth: i32,
+            max_depth: i32,
             maximizing_player: bool,
-        ) -> (NotNan<f32>, Option<ChessMove>) {
-            if depth == 0 || tree.is_leaf() {
-                return (Engine::static_evaluation(&tree.board_state), None);
+        ) -> (Eval, Option<ChessMove>) {
+            if depth == max_depth || tree.is_leaf() {
+                let eval = self.static_evaluation(&tree.board_state);
+                if let Eval::Numeric(_) = eval {
+                    if depth < min_depth {
+                        return (
+                            Eval::Numeric(
+                                NotNan::new(INFINITY).unwrap()
+                                    * match maximizing_player {
+                                        true => 1.0,
+                                        false => -1.0,
+                                    },
+                            ),
+                            None,
+                        );
+                    }
+                }
+                return (eval, None);
             }
 
             if maximizing_player {
-                let mut max_eval = NotNan::new(std::f32::NEG_INFINITY).unwrap();
+                let mut max_eval = Eval::MateIn(Color::Black, -1);
                 let mut best_move = None;
                 for (chess_move, child) in tree.moves.clone() {
-                    let eval = Engine::minimax(&child, depth - 1, false).0;
+                    let eval = self
+                        .minimax(&child, depth + 1, min_depth, max_depth, false)
+                        .0
+                        .increase_mate_counter();
                     if eval > max_eval {
                         max_eval = eval;
                         best_move = Some(chess_move)
@@ -346,10 +534,13 @@ pub mod teros_engine {
                 }
                 return (max_eval, best_move);
             } else {
-                let mut min_eval = NotNan::new(std::f32::INFINITY).unwrap();
+                let mut min_eval = Eval::MateIn(Color::White, -1);
                 let mut best_move = None;
                 for (chess_move, child) in tree.moves.clone() {
-                    let eval = Engine::minimax(&child, depth - 1, true).0;
+                    let eval = self
+                        .minimax(&child, depth + 1, min_depth, max_depth, true)
+                        .0
+                        .increase_mate_counter();
                     if eval < min_eval {
                         min_eval = eval;
                         best_move = Some(chess_move)
@@ -393,27 +584,22 @@ pub mod teros_engine {
             count as i32
         }
 
-        fn static_evaluation(board_state: &Board) -> NotNan<f32> {
-            const SQUARE_CONTROL_WEIGHT: f32 = 0.2;
-            const CHECK_WEIGHT: f32 = 3.0;
+        fn static_evaluation(&self, board_state: &Board) -> Eval {
             match board_state.is_checkmate {
                 None => {}
-                Some(Color::White) => {
-                    return NotNan::new(NEG_INFINITY).unwrap();
-                }
-                Some(Color::Black) => {
-                    return NotNan::new(INFINITY).unwrap();
-                }
+                Some(GameEnd::Mated(Color::White)) => return Eval::MateIn(Color::Black, 0),
+                Some(GameEnd::Mated(Color::Black)) => return Eval::MateIn(Color::White, 0),
+                Some(GameEnd::StaleMate) => return Eval::Numeric(NotNan::new(0.0).unwrap()),
             };
             let mut res = NotNan::new(0.0).unwrap();
             res += (Engine::controlling_squares(board_state, Color::White) as f32)
-                * SQUARE_CONTROL_WEIGHT;
+                * self.static_eval_weights.square_control_weight;
             res -= (Engine::controlling_squares(board_state, Color::Black) as f32)
-                * SQUARE_CONTROL_WEIGHT;
+                * self.static_eval_weights.square_control_weight;
             res += match board_state.is_check {
-                Some(Color::Black) => CHECK_WEIGHT,
+                Some(Color::Black) => self.static_eval_weights.check_weight,
                 None => 0.0,
-                Some(Color::White) => -CHECK_WEIGHT,
+                Some(Color::White) => -self.static_eval_weights.check_weight,
             };
             for row in board_state.get_squares() {
                 for piece_option in row {
@@ -421,46 +607,53 @@ pub mod teros_engine {
                         Some(piece) => {
                             (if piece.kind == PieceKind::King {
                                 NotNan::new(0.0).unwrap()
-                            }
-                            else {
+                            } else {
                                 piece_worth(piece.kind)
                             }) * match piece.color {
                                 Color::White => 1.0,
                                 Color::Black => -1.0,
-                            }
-                        },
+                            } * self.static_eval_weights.value_weight
+                        }
                         None => NotNan::new(0.0).unwrap(),
                     }
                 }
             }
-            res
+            Eval::Numeric(res)
         }
     }
 
-    fn is_past_pawn(row: usize, col: usize, ending_board: &Board, color: Color) -> bool {
+    fn is_past_pawn(row: usize, col: usize, board: &Board, color: Color) -> bool {
         let to_left_option = col.checked_sub(1);
         let to_center = col;
         let to_right = col + 1;
-                        
+
         let cols = match to_left_option {
             Some(to_left) => vec![to_left, to_center, to_right],
-            None => vec![to_center, to_right]
+            None => vec![to_center, to_right],
         };
-                        
+
         let mut past = true;
-        for i in row..BOARD_SIZE {
+        for i in match color {
+            Color::White => row..BOARD_SIZE,
+            Color::Black => 0..row,
+        } {
             for j in cols.clone() {
-                let piece_result = ending_board.get_piece(i, j);
+                let piece_result = board.get_piece(i, j);
                 match piece_result {
-                Ok(Some(piece)) => {
-                    if piece == (Piece{kind: PieceKind::Pawn, color: color.opposite()}) {
-                    past = false;
+                    Ok(Some(piece)) => {
+                        if piece
+                            == (Piece {
+                                kind: PieceKind::Pawn,
+                                color: color.opposite(),
+                            })
+                        {
+                            past = false;
+                            break;
+                        }
                     }
-                },
-                _ => {}
+                    _ => {}
                 }
             }
-    
         }
         past
     }
