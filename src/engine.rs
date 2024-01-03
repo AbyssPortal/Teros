@@ -6,7 +6,7 @@ pub mod teros_engine {
         collections::{BinaryHeap, VecDeque},
         f32::INFINITY,
         sync::{mpsc::Receiver, Arc, Mutex},
-        thread,
+        thread
     };
 
     use ordered_float::NotNan;
@@ -230,6 +230,7 @@ pub mod teros_engine {
         pub queen_moving_bonus: f32,
         pub rook_moving_bonus: f32,
         pub minor_piece_moving_bouns: f32,
+        pub attack_weight: f32,
     }
 
     impl InterestEvaluationWeights {
@@ -243,6 +244,7 @@ pub mod teros_engine {
                 queen_moving_bonus: 1.0,
                 rook_moving_bonus: 2.0,
                 minor_piece_moving_bouns: 4.0,
+                attack_weight: 0.75,
             }
         }
     }
@@ -431,7 +433,13 @@ pub mod teros_engine {
                 let my_num = num.clone();
                 threads.push(thread::spawn(move || {
                     loop {
-                        Engine::think_next_move_cocurrent(&*my_engine).unwrap();
+                        match Engine::think_next_move_cocurrent(&*my_engine) {
+                            Ok(_) => {},
+                            Err(EngineError::NoValidMovesErrror) => break,
+                            Err(err) => {
+                                Result::<(), EngineError>::Err(err).unwrap();
+                            }
+                        };
                         let mut counter_lock = my_counter.lock().unwrap();
                         *counter_lock += 1;
                         if *counter_lock > my_num {
@@ -670,7 +678,7 @@ pub mod teros_engine {
                 None => {
                     NotNan::new(0.0).unwrap()
                 }
-            }//again pulled out of nowhere
+            }
              + match ending_board.is_check.is_some() {
                 true => match ending_board.is_checkmate.is_some() {
                     true => INFINITY,
@@ -683,10 +691,51 @@ pub mod teros_engine {
                 Ok(None) => NotNan::new(0.0).unwrap(),
                 Err(_) => panic!()
              } * interest_eval_weights.capture_weight
+
             + ((Engine::controlling_squares(ending_board, starting_board.get_turn())
              - Engine::controlling_squares(starting_board,starting_board.get_turn())
-            ) as f32)*interest_eval_weights.square_control_weight,
+            ) as f32)*interest_eval_weights.square_control_weight
+
+            + Engine::evaluate_total_attack(ending_board)  * interest_eval_weights.attack_weight
+
             )
+        }
+
+        fn evaluate_total_attack(board: &Board) -> NotNan<f32> {
+            let mut sum = NotNan::new(0.0).unwrap();
+            for i in 0..BOARD_SIZE {
+                for j in 0..BOARD_SIZE {
+                    let moves = match board.generate_moves(i, j)  {
+                        Ok(chess_moves) => chess_moves,
+                        Err(BoardError::NoPieceError | BoardError::WrongTurnError) => continue,
+                        Err(_) => panic!(),
+                    };
+                    for chess_move in moves {
+                        match chess_move {
+                            ChessMove::Normal(normal_move) => {
+                                let attacked_piece = match board.get_piece(normal_move.destination_row, normal_move.destination_col) {
+                                    Ok(Some(piece)) => piece,
+                                    Ok(None) => continue,
+                                    Err(_) => panic!(),
+                                };
+                                sum += piece_worth_king_zero(attacked_piece.kind);
+                            }
+                            ChessMove::Castling(_) => {continue;},
+                            ChessMove::Promotion(normal_move, _) => {
+                                {
+                                    let attacked_piece = match board.get_piece(normal_move.destination_row, normal_move.destination_col) {
+                                        Ok(Some(piece)) => piece,
+                                        Ok(None) => continue,
+                                        Err(_) => panic!(),
+                                    };
+                                    sum += piece_worth_king_zero(attacked_piece.kind);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            sum
         }
 
         pub fn eval_and_best_move(&self) -> (Eval, Option<ChessMove>) {
@@ -700,14 +749,18 @@ pub mod teros_engine {
             )
         }
 
-        pub fn parallel_eval_and_best_move(self: Arc<Self>, parallel_depth: i32) -> (Eval, Option<ChessMove>) {
+        pub fn parallel_eval_and_best_move(
+            self: Arc<Self>,
+            thread_count: usize,
+        ) -> (Eval, Option<ChessMove>) {
+            let thread_count_arc = Arc::new(Mutex::new(thread_count - 1));
             self.clone().parallel_minimax(
                 &self.move_tree,
                 0,
                 self.minimax_settings.min_depth,
                 1000,
-                parallel_depth,
                 self.move_tree.board_state.get_turn() == Color::White,
+                thread_count_arc,
             )
         }
 
@@ -775,79 +828,73 @@ pub mod teros_engine {
             depth: i32,
             min_depth: i32,
             max_depth: i32,
-            parallel_depth: i32,
             maximizing_player: bool,
+            threads_left_arc: Arc<Mutex<usize>>,
         ) -> (Eval, Option<ChessMove>) {
-            if depth > parallel_depth {
-                return self.minimax(tree, depth, min_depth, max_depth, maximizing_player);
-            }
-
-            //probably unreachable
             if depth == max_depth || tree.is_leaf() {
                 return self.minimax(tree, depth, min_depth, max_depth, maximizing_player);
             }
 
-            if maximizing_player {
-                let mut max_eval = Eval::MateIn(Color::Black, -1);
-                let mut best_move = None;
-                let moves = tree.moves.clone();
-                let mut threads = Vec::new();
+            let prefer_eval_predicate = match maximizing_player {
+                true => |x: &Eval, y: &Eval,| x>y,
+                false => |x: &Eval,y: &Eval| x<y,
+            };
 
-                for (chess_move, child) in moves {
-                    let my_self = self.clone();
+            let mut best_eval = Eval::MateIn(match maximizing_player {
+                true => Color::Black,
+                false => Color::White
+            }, -1);
+            let mut best_move = None;
+            let moves = tree.moves.clone();
+            let mut threads = Vec::new();
+
+            let mut sub_evals = Vec::<(Eval, ChessMove)>::new();
+
+            for (chess_move, child) in moves {
+                let my_self = self.clone();
+                let my_threads_left_arc = threads_left_arc.clone();
+                let mut threads_left = threads_left_arc.lock().unwrap();
+                if *threads_left >= 1 {
                     let thread = thread::spawn(move || {
                         let res = my_self.parallel_minimax(
                             &child,
                             depth + 1,
                             min_depth,
                             max_depth,
-                            parallel_depth,
-                            false,
+                            !maximizing_player,
+                            my_threads_left_arc,
                         );
                         (res.0.increase_mate_counter(), chess_move)
                     });
+                    *threads_left -=1 ;
+                    drop(threads_left);
                     threads.push(thread);
+                } else {
+                    drop(threads_left);
+                    let res = my_self.parallel_minimax(
+                        &child,
+                        depth + 1,
+                        min_depth,
+                        max_depth,
+                        !maximizing_player,
+                        my_threads_left_arc,
+                    );
+                    sub_evals.push((res.0.increase_mate_counter(), chess_move));
                 }
-
-                for thread in threads {
-                    let (eval, chess_move) = thread.join().unwrap();
-                    if eval > max_eval {
-                        max_eval = eval;
-                        best_move = Some(chess_move);
-                    }
-                }
-                return (max_eval, best_move);
-            } else {
-                let mut min_eval = Eval::MateIn(Color::White, -1);
-                let mut best_move = None;
-                let moves = tree.moves.clone();
-                let mut threads = Vec::new();
-
-                for (chess_move, child) in moves {
-                    let my_self = self.clone();
-                    let thread = thread::spawn(move || {
-                        let res = my_self.parallel_minimax(
-                            &child,
-                            depth + 1,
-                            min_depth,
-                            max_depth,
-                            parallel_depth,
-                            true,
-                        );
-                        (res.0.increase_mate_counter(), chess_move)
-                    });
-                    threads.push(thread);
-                }
-
-                for thread in threads {
-                    let (eval, chess_move) = thread.join().unwrap();
-                    if eval < min_eval {
-                        min_eval = eval;
-                        best_move = Some(chess_move);
-                    }
-                }
-                return (min_eval, best_move);
             }
+
+            for thread in threads {
+                sub_evals.push(thread.join().unwrap());
+            }
+
+            for (eval, chess_move) in sub_evals {
+                if prefer_eval_predicate(&eval, &best_eval) {
+                    best_eval = eval;
+                    best_move = Some(chess_move);
+                }
+            }
+
+            return (best_eval, best_move);
         }
 
         fn controlling_squares(board: &Board, color: Color) -> i32 {

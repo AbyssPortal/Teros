@@ -15,7 +15,6 @@ use crate::engine::teros_engine::{
 
 const THREAD_COUNT: usize = 32;
 
-const MAX_MINIMAX_DEPTH: i32 = 2;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -128,7 +127,7 @@ fn main() {
             let engine_arc = Arc::new(engine);
             let eval = engine_arc
                 .clone()
-                .parallel_eval_and_best_move(MAX_MINIMAX_DEPTH);
+                .parallel_eval_and_best_move(THREAD_COUNT);
             engine = Arc::try_unwrap(engine_arc).unwrap();
             // engine.print_tree(10);
             if !pgn_mode {
