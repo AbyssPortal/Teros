@@ -5,6 +5,8 @@ pub mod teros_engine {
     use std::{
         collections::{BinaryHeap, VecDeque},
         f32::INFINITY,
+        sync::{mpsc::Receiver, Arc, Mutex},
+        thread,
     };
 
     use ordered_float::NotNan;
@@ -419,6 +421,182 @@ pub mod teros_engine {
             Ok(())
         }
 
+        pub fn multi_thread_think_next_num_moves(self, thread_count: usize, num: usize) -> Engine {
+            let engine_arc: Arc<Mutex<Engine>> = Arc::new(Mutex::new(self));
+            let mut threads = Vec::new();
+            let counter = Arc::new(Mutex::new(0));
+            for _ in 0..thread_count {
+                let my_engine = engine_arc.clone();
+                let my_counter = counter.clone();
+                let my_num = num.clone();
+                threads.push(thread::spawn(move || {
+                    loop {
+                        Engine::think_next_move_cocurrent(&*my_engine).unwrap();
+                        let mut counter_lock = my_counter.lock().unwrap();
+                        *counter_lock += 1;
+                        if *counter_lock > my_num {
+                            break;
+                        }
+                    }
+
+                    return;
+                }))
+            }
+
+            for thread in threads {
+                thread.join().unwrap();
+            }
+
+            let lock = Arc::try_unwrap(engine_arc).expect("Lock still has multiple owners");
+            lock.into_inner().expect("Mutex cannot be locked")
+        }
+
+        pub fn multi_thread_think_next_moves_until_stop(
+            self,
+            thread_count: usize,
+            stopper: Receiver<()>,
+        ) -> (Engine, usize) {
+            let keep_going = Arc::new(Mutex::new(true));
+            let engine_arc: Arc<Mutex<Engine>> = Arc::new(Mutex::new(self));
+            let mut threads = Vec::new();
+            let counter = Arc::new(Mutex::new(0));
+            for _ in 0..thread_count {
+                let my_engine = engine_arc.clone();
+                let my_keep_going = keep_going.clone();
+                let my_counter = counter.clone();
+                threads.push(thread::spawn(move || {
+                    loop {
+                        Engine::think_next_move_cocurrent(&*my_engine).unwrap();
+                        let keep_going_lock = my_keep_going.lock().unwrap();
+                        let mut counter_lock = my_counter.lock().unwrap();
+                        *counter_lock += 1;
+                        if !*keep_going_lock {
+                            break;
+                        }
+                    }
+                    return;
+                }))
+            }
+
+            stopper.recv().unwrap();
+
+            let mut keep_going_lock = keep_going.lock().unwrap();
+
+            *keep_going_lock = false;
+
+            drop(keep_going_lock);
+
+            for thread in threads {
+                thread.join().unwrap();
+            }
+
+            let engine_lock = Arc::try_unwrap(engine_arc).expect("Lock still has multiple owners");
+            let counter_lock = Arc::try_unwrap(counter).expect("Lock still has multiple owners");
+            (
+                engine_lock.into_inner().expect("Mutex cannot be locked"),
+                counter_lock.into_inner().expect("Mutex cannot be locked"),
+            )
+        }
+
+        pub fn think_next_move_cocurrent(engine: &Mutex<Engine>) -> Result<(), EngineError> {
+            let mut engine_access = engine.lock().unwrap();
+            let next_move = engine_access
+                .moves
+                .pop()
+                .ok_or(EngineError::NoValidMovesErrror)?;
+            drop(engine_access);
+            let mut location = next_move.location;
+            location.push_back(next_move.valued_move.chess_move);
+            Engine::generate_all_moves_cocurrent(engine, location)
+        }
+
+        fn generate_all_moves_cocurrent(
+            engine: &Mutex<Engine>,
+            location: VecDeque<ChessMove>,
+        ) -> Result<(), EngineError> {
+            //get weights
+            let mut engine_access = engine.lock().unwrap();
+
+            let interest_weights = engine_access.interest_eval_weights.clone();
+            let depth_cost = engine_access.static_eval_weights.depth_cost.clone();
+
+            //copy board to work on local thread
+            let tree = engine_access.go_to_location(&location)?.clone();
+            //free engine for others to use
+            drop(engine_access);
+            //generate moves
+            let mut all_moves = Vec::<(ChessMove, Board)>::new();
+
+            for i in 0..BOARD_SIZE {
+                for j in 0..BOARD_SIZE {
+                    match tree.board_state.generate_moves(i, j) {
+                        Ok(moves) => {
+                            for chess_move in moves {
+                                let mut new_board = tree.board_state.clone();
+                                match new_board.make_legal_move(chess_move) {
+                                    Ok(()) => {
+                                        all_moves.push((chess_move, new_board));
+                                    }
+                                    Err(_) => {}
+                                }
+                            }
+                        }
+                        Err(BoardError::NoPieceError | BoardError::WrongTurnError) => {}
+                        Err(_) => {
+                            panic!("what");
+                        }
+                    }
+                }
+            }
+
+            //store all the moves in proper formats
+            let valued_move_locations: Vec<ValuedMoveLocation> = all_moves
+                .iter()
+                .map(|x: &(ChessMove, Board)| ValuedMoveLocation {
+                    valued_move: ValuedChessMove {
+                        value: Engine::evaluate_interest(
+                            &interest_weights,
+                            &x.0,
+                            &tree.board_state,
+                            &x.1,
+                        )
+                        .unwrap(),
+                        chess_move: x.0.clone(),
+                    },
+                    location: location.clone(),
+                    depth_cost,
+                })
+                .collect();
+
+            let mut move_map = BTreeMap::new();
+
+            for (chesss_move, ending_board) in all_moves {
+                move_map.insert(
+                    chesss_move,
+                    MoveTree {
+                        board_state: ending_board,
+                        moves: BTreeMap::new(),
+                    },
+                );
+            }
+
+            //get back on engine to add values
+            engine_access = engine.lock().unwrap();
+
+            let real_tree = engine_access.go_to_location(&location)?;
+
+            real_tree.moves = move_map;
+
+            for valued_move_location in valued_move_locations {
+                engine_access.moves.push(valued_move_location);
+            }
+
+            drop(engine_access);
+            //yipee!
+
+            Ok(())
+        }
+
         fn evaluate_interest(
             interest_eval_weights: &InterestEvaluationWeights,
             chess_move: &ChessMove,
@@ -522,6 +700,17 @@ pub mod teros_engine {
             )
         }
 
+        pub fn parallel_eval_and_best_move(self: Arc<Self>, parallel_depth: i32) -> (Eval, Option<ChessMove>) {
+            self.clone().parallel_minimax(
+                &self.move_tree,
+                0,
+                self.minimax_settings.min_depth,
+                1000,
+                parallel_depth,
+                self.move_tree.board_state.get_turn() == Color::White,
+            )
+        }
+
         fn minimax(
             &self,
             tree: &MoveTree,
@@ -574,6 +763,87 @@ pub mod teros_engine {
                     if eval < min_eval {
                         min_eval = eval;
                         best_move = Some(chess_move)
+                    }
+                }
+                return (min_eval, best_move);
+            }
+        }
+
+        fn parallel_minimax(
+            self: Arc<Self>,
+            tree: &MoveTree,
+            depth: i32,
+            min_depth: i32,
+            max_depth: i32,
+            parallel_depth: i32,
+            maximizing_player: bool,
+        ) -> (Eval, Option<ChessMove>) {
+            if depth > parallel_depth {
+                return self.minimax(tree, depth, min_depth, max_depth, maximizing_player);
+            }
+
+            //probably unreachable
+            if depth == max_depth || tree.is_leaf() {
+                return self.minimax(tree, depth, min_depth, max_depth, maximizing_player);
+            }
+
+            if maximizing_player {
+                let mut max_eval = Eval::MateIn(Color::Black, -1);
+                let mut best_move = None;
+                let moves = tree.moves.clone();
+                let mut threads = Vec::new();
+
+                for (chess_move, child) in moves {
+                    let my_self = self.clone();
+                    let thread = thread::spawn(move || {
+                        let res = my_self.parallel_minimax(
+                            &child,
+                            depth + 1,
+                            min_depth,
+                            max_depth,
+                            parallel_depth,
+                            false,
+                        );
+                        (res.0.increase_mate_counter(), chess_move)
+                    });
+                    threads.push(thread);
+                }
+
+                for thread in threads {
+                    let (eval, chess_move) = thread.join().unwrap();
+                    if eval > max_eval {
+                        max_eval = eval;
+                        best_move = Some(chess_move);
+                    }
+                }
+                return (max_eval, best_move);
+            } else {
+                let mut min_eval = Eval::MateIn(Color::White, -1);
+                let mut best_move = None;
+                let moves = tree.moves.clone();
+                let mut threads = Vec::new();
+
+                for (chess_move, child) in moves {
+                    let my_self = self.clone();
+                    let thread = thread::spawn(move || {
+                        let res = my_self.parallel_minimax(
+                            &child,
+                            depth + 1,
+                            min_depth,
+                            max_depth,
+                            parallel_depth,
+                            true,
+                        );
+                        (res.0.increase_mate_counter(), chess_move)
+                    });
+                    threads.push(thread);
+                }
+
+                for thread in threads {
+                    let (eval, chess_move) = thread.join().unwrap();
+                    if eval < min_eval {
+                        min_eval = eval;
+                        best_move = Some(chess_move);
                     }
                 }
                 return (min_eval, best_move);
