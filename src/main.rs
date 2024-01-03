@@ -1,9 +1,6 @@
 mod engine;
 
-use std::{
-    io::stdin,
-    io::stdout,
-};
+use std::{env, io::stdin, io::stdout, sync::Arc};
 
 use rust_chess::chess::{
     self,
@@ -16,9 +13,16 @@ use crate::engine::teros_engine::{
     InterestEvaluationWeights, MinimaxSettings, StaticEvaluationWeights,
 };
 
+const THREAD_COUNT: usize = 32;
+
+const MAX_MINIMAX_DEPTH: i32 = 2;
+
 fn main() {
+    let args: Vec<String> = env::args().collect();
+    let setup = args.iter().any(|arg| arg == "-su");
+
     let stdin = stdin();
-    let board = match yes_or_no("use fen?") {
+    let board = match setup && yes_or_no("use fen?") {
         true => {
             println!("enter fen");
             loop {
@@ -36,22 +40,22 @@ fn main() {
     };
 
     let turns_to_eval = vec![
-        match yes_or_no("Eval for white?") {
+        match !setup || yes_or_no("Eval for white?") {
             true => Some(Color::White),
             false => None,
         },
-        match yes_or_no("Eval for black?") {
+        match !setup || yes_or_no("Eval for black?") {
             true => Some(Color::Black),
             false => None,
         },
     ];
 
     let turns_to_play = vec![
-        match turns_to_eval.contains(&Some(Color::White)) && yes_or_no("Play for white?") {
+        match turns_to_eval.contains(&Some(Color::White)) && setup && yes_or_no("Play for white?") {
             true => Some(Color::White),
             false => None,
         },
-        match turns_to_eval.contains(&Some(Color::Black)) && yes_or_no("Play for black?") {
+        match turns_to_eval.contains(&Some(Color::Black)) && setup && yes_or_no("Play for black?") {
             true => Some(Color::Black),
             false => None,
         },
@@ -64,7 +68,7 @@ fn main() {
         MinimaxSettings::new(),
     );
 
-    let max_pondering: Option<i32> = match yes_or_no("Limit pondering?") {
+    let max_pondering: Option<usize> = match setup && yes_or_no("Limit pondering?") {
         false => None,
         true => {
             println!("how much?");
@@ -72,7 +76,7 @@ fn main() {
         }
     };
 
-    let pgn_mode = yes_or_no("pgn only mode?");
+    let pgn_mode = setup && yes_or_no("pgn only mode?");
 
     // engine.print_tree(10);
     let mut stdout = stdout();
@@ -81,57 +85,51 @@ fn main() {
     let mut move_number = 1;
     loop {
         if turns_to_eval.contains(&Some(engine.get_board().get_turn())) && i >= START_EVAL_TURN {
-            if !pgn_mode {
-                println!("PONDERING!!!! (enter any value to stop)");
-            }
             // ...
 
             let (stop_sender, stop_reciever) = std::sync::mpsc::channel();
 
-            let thread_handle = thread::spawn(move || {
-                let mut i = 0;
-                loop {
-                    match stop_reciever.try_recv() {
-                        Ok(_) => break,
-                        Err(std::sync::mpsc::TryRecvError::Empty) => {
-                            match engine.think_next_move() {
-                                Ok(_) => {}
-                                Err(engine::teros_engine::EngineError::NoValidMovesErrror) => {
-                                    break;
-                                }
-                                Err(err) => {
-                                    panic!("{:?}", err);
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            panic!("{:?}", err);
-                        }
+            engine = match max_pondering {
+                Some(max_pondering_num) => {
+                    if !pgn_mode {
+                        println!("PONDERING!!!! (until done as much as you told me)");
                     }
-                    i += 1;
-                    if let Some(num) = max_pondering {
-                        if i > num {
-                            break;
-                        }
+
+                    let res =
+                        engine.multi_thread_think_next_num_moves(THREAD_COUNT, max_pondering_num);
+
+                    if !pgn_mode {
+                        println!("EVALUATING!!!!");
                     }
+                    res
                 }
-                (engine, i)
-            });
+                None => {
+                    if !pgn_mode {
+                        println!("PONDERING!!!! (enter any value to stop)");
+                    }
 
-            if max_pondering.is_none() {
-                let _: String = read!();
-                stop_sender.send(()).unwrap();
-            }
+                    let thread_handle = thread::spawn(move || {
+                        engine.multi_thread_think_next_moves_until_stop(THREAD_COUNT, stop_reciever)
+                    });
 
-            let res = thread_handle.join().unwrap();
-            engine = res.0;
-            let i = res.1;
+                    let _: String = read!();
 
-            if !pgn_mode {
-                println!("PONDERED {} TIMES!!!!", i);
-                println!("EVALUATING!!!!");
-            }
-            let eval = engine.eval_and_best_move();
+                    stop_sender.send(()).unwrap();
+
+                    let res = thread_handle.join().unwrap();
+
+                    if !pgn_mode {
+                        println!("PONDERED {} TIMES!!!!", res.1);
+                        println!("EVALUATING!!!!");
+                    }
+                    res.0
+                }
+            };
+            let engine_arc = Arc::new(engine);
+            let eval = engine_arc
+                .clone()
+                .parallel_eval_and_best_move(MAX_MINIMAX_DEPTH);
+            engine = Arc::try_unwrap(engine_arc).unwrap();
             // engine.print_tree(10);
             if !pgn_mode {
                 println!(
@@ -160,6 +158,8 @@ fn main() {
                         break;
                     }
                 }
+            } else {
+                engine.get_board().print_board(&mut stdout).unwrap();
             }
         }
         if !pgn_mode {
