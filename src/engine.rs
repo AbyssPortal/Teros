@@ -6,7 +6,7 @@ pub mod teros_engine {
         collections::{BinaryHeap, VecDeque},
         f32::INFINITY,
         sync::{mpsc::Receiver, Arc, Mutex},
-        thread
+        thread,
     };
 
     use ordered_float::NotNan;
@@ -207,6 +207,7 @@ pub mod teros_engine {
         pub check_weight: f32,
         pub value_weight: f32,
         pub depth_cost: NotNan<f32>,
+        pub past_pawn_weight: f32,
     }
 
     #[derive(Debug, Clone)]
@@ -241,9 +242,9 @@ pub mod teros_engine {
                 home_row_pawn_weight: 3.5,
                 check_weight: 10.0,
                 king_moving_bonus: -2.0,
-                queen_moving_bonus: 1.0,
-                rook_moving_bonus: 2.0,
-                minor_piece_moving_bouns: 4.0,
+                queen_moving_bonus: 1.50,
+                rook_moving_bonus: 3.0,
+                minor_piece_moving_bouns: 7.0,
                 attack_weight: 0.75,
             }
         }
@@ -256,6 +257,7 @@ pub mod teros_engine {
                 check_weight: 3.0,
                 value_weight: 1.0,
                 depth_cost: NotNan::new(15.0).unwrap(),
+                past_pawn_weight: 0.5,
             }
         }
     }
@@ -434,7 +436,7 @@ pub mod teros_engine {
                 threads.push(thread::spawn(move || {
                     loop {
                         match Engine::think_next_move_cocurrent(&*my_engine) {
-                            Ok(_) => {},
+                            Ok(_) => {}
                             Err(EngineError::NoValidMovesErrror) => break,
                             Err(err) => {
                                 Result::<(), EngineError>::Err(err).unwrap();
@@ -643,61 +645,69 @@ pub mod teros_engine {
             Ok(
                 match starting_board.get_piece(normal_move.initial_row, normal_move.initial_col)? {
                     None => return Err(BoardError::NoPieceError),
-                    Some(Piece {kind: PieceKind::Pawn, color }) => {
-                        let past = is_past_pawn(normal_move.destination_row, normal_move.destination_col, ending_board, color);
+                    Some(Piece {
+                        kind: PieceKind::Pawn,
+                        color,
+                    }) => {
+                        let past = is_past_pawn(
+                            normal_move.destination_row,
+                            normal_move.destination_col,
+                            ending_board,
+                            color,
+                        );
                         let value = match past {
                             true => NotNan::new(normal_move.destination_row as f32).unwrap(),
                             false => NotNan::new(0.0).unwrap(),
-                        }
-                         + match normal_move.initial_row == match color {
-                            Color::Black => 6,
-                            Color::White => 1,
-                        } {
+                        } + match normal_move.initial_row
+                            == match color {
+                                Color::Black => 6,
+                                Color::White => 1,
+                            } {
                             true => interest_eval_weights.home_row_pawn_weight,
                             false => 0.0,
                         };
                         value
                     }
-                    Some(Piece {kind: PieceKind::Bishop | PieceKind::Knight, color: _ }) => {
-                        NotNan::new(interest_eval_weights.minor_piece_moving_bouns).unwrap()
+                    Some(Piece {
+                        kind: PieceKind::Bishop | PieceKind::Knight,
+                        color: _,
+                    }) => NotNan::new(interest_eval_weights.minor_piece_moving_bouns).unwrap(),
+                    Some(Piece {
+                        kind: PieceKind::Rook,
+                        color: _,
+                    }) => NotNan::new(interest_eval_weights.rook_moving_bonus).unwrap(),
+                    Some(Piece {
+                        kind: PieceKind::Queen,
+                        color: _,
+                    }) => NotNan::new(interest_eval_weights.queen_moving_bonus).unwrap(),
+                    Some(Piece {
+                        kind: PieceKind::King,
+                        color: _,
+                    }) => NotNan::new(interest_eval_weights.king_moving_bonus).unwrap(),
+                } + match starting_board
+                    .get_piece(normal_move.destination_row, normal_move.destination_col)?
+                {
+                    Some(piece) => piece_worth_king_inf(piece.kind),
+                    None => NotNan::new(0.0).unwrap(),
+                } + match ending_board.is_check.is_some() {
+                    true => match ending_board.is_checkmate.is_some() {
+                        true => INFINITY,
+                        false => interest_eval_weights.check_weight,
                     },
-                    Some(Piece {kind: PieceKind::Rook, color: _ }) => {
-                        NotNan::new(interest_eval_weights.rook_moving_bonus).unwrap()
-                    },
-                    Some(Piece {kind: PieceKind::Queen, color: _ }) => {
-                        NotNan::new(interest_eval_weights.queen_moving_bonus).unwrap()
-                    },
-                    Some(Piece {kind: PieceKind::King, color: _ }) => {
-                        NotNan::new(interest_eval_weights.king_moving_bonus).unwrap()
-                    },
-                } +
-                match starting_board.get_piece(normal_move.destination_row, normal_move.destination_col)? {
-                Some(piece) => {
-                    piece_worth_king_inf(piece.kind)
-                }
-                None => {
-                    NotNan::new(0.0).unwrap()
-                }
-            }
-             + match ending_board.is_check.is_some() {
-                true => match ending_board.is_checkmate.is_some() {
-                    true => INFINITY,
-                    false => interest_eval_weights.check_weight
-                }
-                false => 0.0
-            }
-             + match starting_board.get_piece(normal_move.destination_row, normal_move.destination_col)  {
-                Ok(Some(piece)) => piece_worth_king_inf(piece.kind),
-                Ok(None) => NotNan::new(0.0).unwrap(),
-                Err(_) => panic!()
-             } * interest_eval_weights.capture_weight
-
-            + ((Engine::controlling_squares(ending_board, starting_board.get_turn())
-             - Engine::controlling_squares(starting_board,starting_board.get_turn())
-            ) as f32)*interest_eval_weights.square_control_weight
-
-            + Engine::evaluate_total_attack(ending_board)  * interest_eval_weights.attack_weight
-
+                    false => 0.0,
+                } + match starting_board
+                    .get_piece(normal_move.destination_row, normal_move.destination_col)
+                {
+                    Ok(Some(piece)) => piece_worth_king_inf(piece.kind),
+                    Ok(None) => NotNan::new(0.0).unwrap(),
+                    Err(_) => panic!(),
+                } * interest_eval_weights.capture_weight
+                    + ((Engine::controlling_squares(ending_board, starting_board.get_turn())
+                        - Engine::controlling_squares(starting_board, starting_board.get_turn()))
+                        as f32)
+                        * interest_eval_weights.square_control_weight
+                    + Engine::evaluate_total_attack(ending_board)
+                        * interest_eval_weights.attack_weight,
             )
         }
 
@@ -705,7 +715,16 @@ pub mod teros_engine {
             let mut sum = NotNan::new(0.0).unwrap();
             for i in 0..BOARD_SIZE {
                 for j in 0..BOARD_SIZE {
-                    let moves = match board.generate_moves(i, j)  {
+                    let piece = board.get_piece(i, j).unwrap();
+                    match piece {
+                        None => continue,
+                        Some(piece) => {
+                            if piece.color == board.get_turn() {
+                                continue;
+                            }
+                        }
+                    }
+                    let moves = match board.generate_moves_ignore_turn(i, j) {
                         Ok(chess_moves) => chess_moves,
                         Err(BoardError::NoPieceError | BoardError::WrongTurnError) => continue,
                         Err(_) => panic!(),
@@ -713,23 +732,29 @@ pub mod teros_engine {
                     for chess_move in moves {
                         match chess_move {
                             ChessMove::Normal(normal_move) => {
-                                let attacked_piece = match board.get_piece(normal_move.destination_row, normal_move.destination_col) {
+                                let attacked_piece = match board.get_piece(
+                                    normal_move.destination_row,
+                                    normal_move.destination_col,
+                                ) {
                                     Ok(Some(piece)) => piece,
                                     Ok(None) => continue,
                                     Err(_) => panic!(),
                                 };
                                 sum += piece_worth_king_zero(attacked_piece.kind);
                             }
-                            ChessMove::Castling(_) => {continue;},
+                            ChessMove::Castling(_) => {
+                                continue;
+                            }
                             ChessMove::Promotion(normal_move, _) => {
-                                {
-                                    let attacked_piece = match board.get_piece(normal_move.destination_row, normal_move.destination_col) {
-                                        Ok(Some(piece)) => piece,
-                                        Ok(None) => continue,
-                                        Err(_) => panic!(),
-                                    };
-                                    sum += piece_worth_king_zero(attacked_piece.kind);
-                                }
+                                let attacked_piece = match board.get_piece(
+                                    normal_move.destination_row,
+                                    normal_move.destination_col,
+                                ) {
+                                    Ok(Some(piece)) => piece,
+                                    Ok(None) => continue,
+                                    Err(_) => panic!(),
+                                };
+                                sum += piece_worth_king_zero(attacked_piece.kind);
                             }
                         }
                     }
@@ -836,14 +861,17 @@ pub mod teros_engine {
             }
 
             let prefer_eval_predicate = match maximizing_player {
-                true => |x: &Eval, y: &Eval,| x>y,
-                false => |x: &Eval,y: &Eval| x<y,
+                true => |x: &Eval, y: &Eval| x > y,
+                false => |x: &Eval, y: &Eval| x < y,
             };
 
-            let mut best_eval = Eval::MateIn(match maximizing_player {
-                true => Color::Black,
-                false => Color::White
-            }, -1);
+            let mut best_eval = Eval::MateIn(
+                match maximizing_player {
+                    true => Color::Black,
+                    false => Color::White,
+                },
+                -1,
+            );
             let mut best_move = None;
             let moves = tree.moves.clone();
             let mut threads = Vec::new();
@@ -866,7 +894,7 @@ pub mod teros_engine {
                         );
                         (res.0.increase_mate_counter(), chess_move)
                     });
-                    *threads_left -=1 ;
+                    *threads_left -= 1;
                     drop(threads_left);
                     threads.push(thread);
                 } else {
@@ -948,19 +976,37 @@ pub mod teros_engine {
                 None => 0.0,
                 Some(Color::White) => -self.static_eval_weights.check_weight,
             };
-            for row in board_state.get_squares() {
-                for piece_option in row {
+            for i in 0..BOARD_SIZE {
+                for j in 0..BOARD_SIZE {
+                    let piece_option = board_state.get_piece(i, j).unwrap();
                     res += match piece_option {
-                        Some(piece) => {
-                            (if piece.kind == PieceKind::King {
-                                NotNan::new(0.0).unwrap()
-                            } else {
-                                piece_worth_king_inf(piece.kind)
-                            }) * match piece.color {
-                                Color::White => 1.0,
-                                Color::Black => -1.0,
-                            } * self.static_eval_weights.value_weight
-                        }
+                        Some(piece) => match piece.kind {
+                            PieceKind::Pawn => {
+                                piece_worth_king_zero(piece.kind)
+                                    * match piece.color {
+                                        Color::White => 1.0,
+                                        Color::Black => -1.0,
+                                    }
+                                    + match is_past_pawn(i, j, board_state, piece.color) {
+                                        true => match piece.color {
+                                            Color::Black => 8.0 - (i as f32),
+                                            Color::White => i as f32,
+                                        },
+                                        false => 0.0,
+                                    } * match piece.color {
+                                        Color::White => 1.0,
+                                        Color::Black => -1.0,
+                                    } * self.static_eval_weights.past_pawn_weight
+                            }
+                            _ => {
+                                piece_worth_king_zero(piece.kind)
+                                    * match piece.color {
+                                        Color::White => 1.0,
+                                        Color::Black => -1.0,
+                                    }
+                                    * self.static_eval_weights.value_weight
+                            }
+                        },
                         None => NotNan::new(0.0).unwrap(),
                     }
                 }

@@ -1,6 +1,11 @@
 mod engine;
 
-use std::{env, io::stdin, io::stdout, sync::Arc};
+use std::{
+    env,
+    io::stdin,
+    io::{stdout, Write},
+    sync::Arc,
+};
 
 use rust_chess::chess::{
     self,
@@ -14,7 +19,6 @@ use crate::engine::teros_engine::{
 };
 
 const THREAD_COUNT: usize = 32;
-
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -84,8 +88,6 @@ fn main() {
     let mut move_number = 1;
     loop {
         if turns_to_eval.contains(&Some(engine.get_board().get_turn())) && i >= START_EVAL_TURN {
-            // ...
-
             let (stop_sender, stop_reciever) = std::sync::mpsc::channel();
 
             engine = match max_pondering {
@@ -125,9 +127,7 @@ fn main() {
                 }
             };
             let engine_arc = Arc::new(engine);
-            let eval = engine_arc
-                .clone()
-                .parallel_eval_and_best_move(THREAD_COUNT);
+            let eval = engine_arc.clone().parallel_eval_and_best_move(THREAD_COUNT);
             engine = Arc::try_unwrap(engine_arc).unwrap();
             // engine.print_tree(10);
             if !pgn_mode {
@@ -202,20 +202,25 @@ fn make_engine_move_and_print(
 ) -> Result<(), engine::teros_engine::EngineError> {
     if pgn_mode {
         match engine.get_board().get_turn() {
-            Color::White => print!(
-                "{}. {}",
-                move_number,
-                chess_move.name(engine.get_board()).unwrap()
-            ),
+            Color::White => {
+                print!(
+                    "{}. {}",
+                    move_number,
+                    chess_move.name(engine.get_board()).unwrap()
+                );
+                stdout.flush().unwrap();
+            }
             Color::Black => {
                 print!(" {}\n", chess_move.name(engine.get_board()).unwrap());
                 *move_number += 1;
             }
         }
+        engine.make_move(&chess_move)?;
     } else {
+        engine.make_move(&chess_move)?;
         engine.get_board().print_board(stdout).unwrap();
     }
-    engine.make_move(&chess_move)
+    Ok(())
 }
 
 fn yes_or_no(question: &str) -> bool {
